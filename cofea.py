@@ -55,14 +55,14 @@ def axial_element_stiffness(nodes, element, young_mod: float, area: float):
 
     return local_stiffness
 
-
 def truss_stiffness(nodes, elements, young_mod: float, areas):
 
     problem_size = len(nodes) * 2
 
     global_stiffness = np.zeros((problem_size, problem_size))
 
-    for element,area in zip(elements,areas):
+    for element, area in zip(elements, areas):
+
         local_stiffness_mat = axial_element_stiffness(nodes, element, young_mod, area)
 
         na_idx = 2*element[0]
@@ -72,6 +72,26 @@ def truss_stiffness(nodes, elements, young_mod: float, areas):
         global_stiffness[na_idx:na_idx+2, nb_idx:nb_idx+2] += local_stiffness_mat[0:2,2:4]
         global_stiffness[nb_idx:nb_idx+2, na_idx:na_idx+2] += local_stiffness_mat[2:4,0:2]
         global_stiffness[nb_idx:nb_idx+2, nb_idx:nb_idx+2] += local_stiffness_mat[2:4,2:4]
+
+    return global_stiffness
+
+def truss_stiffness_diff_Ai(nodes, elements, young_mod: float, diff_index):
+
+    problem_size = len(nodes) * 2
+
+    global_stiffness = np.zeros((problem_size, problem_size))
+
+    for i, element in enumerate(elements):
+        if i == diff_index:
+            local_stiffness_mat = axial_element_stiffness(nodes, element, young_mod, 1)
+
+            na_idx = 2*element[0]
+            nb_idx = 2*element[1]
+
+            global_stiffness[na_idx:na_idx+2, na_idx:na_idx+2] += local_stiffness_mat[0:2,0:2]
+            global_stiffness[na_idx:na_idx+2, nb_idx:nb_idx+2] += local_stiffness_mat[0:2,2:4]
+            global_stiffness[nb_idx:nb_idx+2, na_idx:na_idx+2] += local_stiffness_mat[2:4,0:2]
+            global_stiffness[nb_idx:nb_idx+2, nb_idx:nb_idx+2] += local_stiffness_mat[2:4,2:4]
 
     return global_stiffness
 
@@ -109,7 +129,7 @@ def truss_load_vec(nodes, elements, mass_dens: float, areas: float, grav_angle=-
 
     return global_load
 
-def solve2dtruss(nodes, elements, extern_loads, bounds, mass_dens, cs_area, young_mod, grav_angle=-np.pi/2):
+def solve2dtruss(nodes, elements, extern_loads, bounds, mass_dens, areas, young_mod, grav_angle=-np.pi/2):
     '''
         bounds is an array with 1 indicating that the node/direction is allowed to move, 0 otherwise
 
@@ -119,8 +139,8 @@ def solve2dtruss(nodes, elements, extern_loads, bounds, mass_dens, cs_area, youn
     for el in bounds:
         assert(el == 0 or el == 1)
 
-    stiff = truss_stiffness(nodes, elements, young_mod, cs_area)
-    loads = truss_load_vec(nodes, elements, mass_dens, cs_area)
+    stiff = truss_stiffness(nodes, elements, young_mod, areas)
+    loads = truss_load_vec(nodes, elements, mass_dens, areas)
 
     loads += extern_loads
 
@@ -367,7 +387,7 @@ def local_to_global(nodes, global_node_indices, xi, eta):
 
 
 from typing import Callable
-def local_plane_load_vec(nodes, element,  extern_loads_fun, extern_loads_face, mass_dens, thick, weightless=False):
+def local_plane_load_vec(nodes, element,  extern_loads_fun, extern_loads_face, mass_dens, thick, weightless=True):
 
     ###
     # TODO: this only allows one face traction per element right now
@@ -453,7 +473,7 @@ def local_plane_load_vec(nodes, element,  extern_loads_fun, extern_loads_face, m
         x,y = local_to_global(nodes, element, *args)
         q = np.asarray(extern_loads_fun(x, y))
 
-        # make one for each node, the only select the relevant ones
+        # make one for each node, then only select the relevant ones
         q = np.tile(q,4)
         q = q*Ns
 
@@ -469,11 +489,18 @@ def local_plane_load_vec(nodes, element,  extern_loads_fun, extern_loads_face, m
 
 
 def global_plane_stiffness(nodes, elements, young_mod, poisson, thickness):
+    ''' Constructs global stiffness matrix for a planar structure
 
-    if not isinstance(thickness, list):
-        thickness = [thickness] * len(elements)
+    Args:
+        nodes: list of node locations in x,y
+        elements: list of index pairs pointing to exactly two nodes
+        young_mod: youngs modulus for the structure material
+        poisson: poissons ratio for the structure material
+        thickness: list of thicknesses, one for each element.
+
+    '''
+
     problem_size = len(nodes) * 2
-
     global_stiffness = np.zeros((problem_size, problem_size))
 
     for element, thick in zip(elements, thickness):
@@ -484,6 +511,33 @@ def global_plane_stiffness(nodes, elements, young_mod, poisson, thickness):
                 # map each 2x2 block of the local 2Mx2M stiffness matrix to the respective block in the global matrix
                 global_stiffness[2*nodei:2*nodei+2, 2*nodej:2*nodej+2] += local_stiffness_mat[2*i:2*i+2, 2*j:2*j+2]
 
+    return global_stiffness
+
+def global_plane_stiffness_diff_ti(nodes, elements, young_mod, poisson, diff_index):
+    ''' Derivative of global stiffness matrix with respect to a single
+    element thickness.
+
+    Just the element in question is filled in, divided by it's thickness, and the rest is zero.
+
+    NOTE: surprisingly, we don't actually need any information about the thickness here
+    '''
+    problem_size = len(nodes) * 2
+
+    global_stiffness = np.zeros((problem_size, problem_size))
+
+    for elem_idx, element in enumerate(elements):
+
+        if elem_idx == diff_index:
+            # This is the element to differentiate
+            thick = 1
+            local_stiffness_mat = planar_element_stiffness(nodes, element, young_mod, poisson, thick)
+
+            for i, nodei in enumerate(element):
+                for j, nodej in enumerate(element):
+                    # map each 2x2 block of the local 2Mx2M stiffness matrix to the respective block in the global matrix
+                    global_stiffness[2*nodei:2*nodei+2, 2*nodej:2*nodej+2] += local_stiffness_mat[2*i:2*i+2, 2*j:2*j+2]
+
+        #else, the entry stays zero
     return global_stiffness
 
 
@@ -534,8 +588,8 @@ def solve2dplane(nodes, elements, extern_loads_fun, bounds, mass_dens, thickness
     loads = loads_full[keep_indices]
 
     assert(tot_load == approx(sum(loads)))
-    print('total applied force: ')
-    print(tot_load)
+    #print('total applied force: ')
+    #print(tot_load)
     redux_sol = np.linalg.solve(stiff, loads)
 
     # Put the full solution together
